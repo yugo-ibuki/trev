@@ -1,0 +1,18 @@
+[package]
+name = "trev"
+version = "0.1.0"
+edition = "2021"
+# File::try_lock（同じ処理を 2 つ同時に流さないためのロック）が 1.89 で安定化した
+rust-version = "1.89"
+description = "Git の差分と参照をターミナルでレビューするツール"
+
+[dependencies]
+anyhow = "1"
+arboard = { version = "3.7", default-features = false }
+clap = { version = "4", features = ["derive"] }
+crossterm = { version = "0.29", default-features = false, features = ["events"] }
+ratatui = { version = "0.30.2", default-features = false, features = ["crossterm"] }
+serde = { version = "1", features = ["derive"] }
+# preserve_order: 書き出す JSON のキーの並びを、読み込んだときと同じに保つ
+serde_json = { version = "1", features = ["preserve_order"] }
+two-face = { version = "0.5.2", default-features = false, features = ["syntect-fancy"] }
