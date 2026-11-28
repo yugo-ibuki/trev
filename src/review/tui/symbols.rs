@@ -7,6 +7,7 @@ pub(super) struct Symbols {
     path: String,
     mode: SymbolMode,
     query: String,
+    editing: bool,
     selected: usize,
     submitted: Option<(SymbolMode, String)>,
     results: Option<ContentResults>,
@@ -99,6 +100,7 @@ impl Symbols {
             mode,
             origin,
             query: String::new(),
+            editing: true,
             selected: 0,
             submitted: None,
             results: None,
@@ -146,6 +148,7 @@ impl App {
         let mode = search.mode;
         let (tx, rx) = mpsc::channel();
         search.submitted = Some((mode, query.clone()));
+        search.editing = false;
         search.error = None;
         std::thread::spawn(move || {
             let _ = tx.send(
@@ -492,6 +495,13 @@ impl App {
             }
             KeyCode::Up => search.selected = search.selected.saturating_sub(1),
             KeyCode::Down => search.selected = shifted(search.selected, 1, search.count()),
+            KeyCode::Char('k') if !search.editing && key.modifiers == KeyModifiers::NONE => {
+                search.selected = search.selected.saturating_sub(1);
+            }
+            KeyCode::Char('j') if !search.editing && key.modifiers == KeyModifiers::NONE => {
+                search.selected = shifted(search.selected, 1, search.count());
+            }
+            KeyCode::Char('/') if !search.editing => search.editing = true,
             KeyCode::PageUp => search.selected = search.selected.saturating_sub(self.page_height),
             KeyCode::PageDown => {
                 search.selected =
@@ -499,12 +509,13 @@ impl App {
             }
             KeyCode::Home => search.selected = 0,
             KeyCode::End => search.selected = search.count().saturating_sub(1),
-            KeyCode::Backspace => {
+            KeyCode::Backspace if search.editing => {
                 search.query.pop();
                 search.invalidate();
             }
             KeyCode::Char(c)
-                if !key.modifiers.contains(KeyModifiers::CONTROL)
+                if search.editing
+                    && !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::SUPER | KeyModifiers::ALT)
                     && !c.is_control()
                     && search.query.len() < 512 =>
             {
@@ -518,6 +529,8 @@ impl App {
             {
                 if search.submitted.as_ref() != Some(&(search.mode, search.query.clone())) {
                     self.submit_symbols(&mut search);
+                } else if search.editing {
+                    search.editing = false;
                 } else if let Some(hit) = search
                     .results
                     .as_ref()
@@ -572,10 +585,14 @@ impl App {
             ["定義", "使用箇所（選択中）"]
         };
         self.draw_click_tabs(frame, regions[0], &labels, active);
+        let hint = if search.editing { "入力中" } else { "/:編集" };
         frame.render_widget(
-            Paragraph::new(format!("検索語: {}", clean(&search.query))),
+            Paragraph::new(format!("検索語: {}  [{hint}]", clean(&search.query))),
             regions[1],
         );
+        if !search.editing {
+            self.register_click(regions[1], MouseAction::Key(KeyCode::Char('/')));
+        }
         let message = if let Some(error) = &search.error {
             Some(clean(error))
         } else if search.source_job.is_some() {
@@ -583,7 +600,11 @@ impl App {
         } else if search.job.is_some() {
             Some("名前を検索中…".into())
         } else if search.submitted.is_none() {
-            Some("関数名・型名などを入力し、Enterで検索してください".into())
+            Some(if search.editing {
+                "関数名・型名などを入力し、Enterで検索してください".into()
+            } else {
+                "Enterで検索、/で検索語を編集できます".into()
+            })
         } else if search.count() == 0 {
             Some("一致する候補はありません".into())
         } else {
@@ -620,10 +641,10 @@ impl App {
                 &mut state,
             );
         }
-        let action = if search.count() > 0 {
-            "開く"
-        } else {
+        let action = if search.editing || search.count() == 0 {
             "検索"
+        } else {
+            "開く"
         };
         self.draw_click_buttons(
             frame,
@@ -642,7 +663,7 @@ impl App {
         } else {
             ""
         };
-        frame.render_widget(Paragraph::new(format!("名前と構文による候補です。同名の別要素を含む場合があります。{limit}\nTab:定義/使用箇所 ↑↓:移動 Enter:検索/開く Esc:戻る Ctrl+C:終了")).wrap(Wrap { trim: false }), regions[4]);
+        frame.render_widget(Paragraph::new(format!("名前と構文による候補です。同名の別要素を含む場合があります。{limit}\nTab:定義/使用箇所 j/k・↑↓:移動 /:検索語を編集 Enter:検索/開く Esc:戻る")).wrap(Wrap { trim: false }), regions[4]);
     }
 }
 
@@ -678,6 +699,7 @@ mod tests {
             let mut search = Symbols::new("immutable".into(), "origin.rs".into(), mode, None);
             search.query = "needle".into();
             search.submitted = Some((mode, search.query.clone()));
+            search.editing = false;
             search.results = Some(ContentResults {
                 hits: vec![
                     ContentHit {
@@ -1106,6 +1128,49 @@ mod tests {
         assert_eq!(source.path, "unmodified.py");
         assert_eq!(source.offset, 2);
         assert_eq!(source.horizontal, 8);
+    }
+
+    #[test]
+    fn jk_navigate_submitted_results_until_the_query_is_explicitly_edited() {
+        let (_fixture, mut app) = super::super::tests::app();
+        app.search_symbol(
+            "headcommit".into(),
+            "a.rs".into(),
+            "needle".into(),
+            SymbolMode::Definitions,
+            None,
+        );
+        press(&mut app, KeyCode::Char('j'));
+        let Overlay::Symbols(search) = &mut app.overlay else {
+            panic!()
+        };
+        assert!(!search.editing);
+        assert_eq!(search.query, "needle");
+        let (tx, rx) = mpsc::channel();
+        search.job = Some((SymbolMode::Definitions, search.query.clone(), rx));
+        tx.send(Ok(ContentResults {
+            hits: (1..=2)
+                .map(|line| ContentHit {
+                    path: "a.rs".into(),
+                    line,
+                    text: "needle".into(),
+                })
+                .collect(),
+            truncated: false,
+        }))
+        .unwrap();
+        assert!(app.poll_symbols());
+
+        press(&mut app, KeyCode::Char('j'));
+        assert!(matches!(&app.overlay, Overlay::Symbols(search) if search.selected == 1 && search.query == "needle"));
+        press(&mut app, KeyCode::Char('k'));
+        assert!(matches!(&app.overlay, Overlay::Symbols(search) if search.selected == 0 && search.count() == 2));
+        press(&mut app, KeyCode::Char('/'));
+        press(&mut app, KeyCode::Char('j'));
+        press(&mut app, KeyCode::Char('k'));
+        assert!(matches!(&app.overlay, Overlay::Symbols(search) if search.query == "needlejk" && search.editing));
+        press(&mut app, KeyCode::Enter);
+        assert!(matches!(&app.overlay, Overlay::Symbols(search) if !search.editing && search.job.is_some()));
     }
 
     #[test]
