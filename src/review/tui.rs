@@ -192,7 +192,7 @@ struct ColorKey {
 
 type DiffColors = Vec<Option<Spans>>;
 
-const DEFAULT_FILE_PANE_PERCENT: u16 = 10;
+const DEFAULT_FILE_PANE_PERCENT: u16 = 15;
 const MIN_FILE_PANE_WIDTH: u16 = 14;
 const FILE_PANE_PERCENT_RANGE: std::ops::RangeInclusive<u16> = 10..=60;
 
@@ -1851,11 +1851,11 @@ mod tests {
     }
 
     #[test]
-    fn wide_review_uses_ten_percent_for_the_file_list_with_a_minimum_width() {
+    fn wide_review_uses_fifteen_percent_for_the_file_list_with_a_minimum_width() {
         use ratatui::backend::TestBackend;
 
         let (_fixture, mut app) = app();
-        for (width, expected) in [(80, 14), (120, 14), (240, 24)] {
+        for (width, expected) in [(80, 14), (120, 18), (240, 36)] {
             let mut terminal = Terminal::new(TestBackend::new(width, 24)).unwrap();
             terminal.draw(|frame| app.draw(frame)).unwrap();
             assert_eq!(app.mouse_panes[0].width, expected);
