@@ -479,6 +479,7 @@ impl App {
         let control = key.modifiers.contains(KeyModifiers::CONTROL);
         if control {
             let steps = match key.code {
+                KeyCode::Char('j' | 'k') => 20,
                 KeyCode::Char('d' | 'u') => self.cursor_height().max(2) / 2,
                 KeyCode::Char('f' | 'b') => self.cursor_height(),
                 _ => {
@@ -487,7 +488,7 @@ impl App {
                     return false;
                 }
             };
-            let direction = if matches!(key.code, KeyCode::Char('u' | 'b')) {
+            let direction = if matches!(key.code, KeyCode::Char('k' | 'u' | 'b')) {
                 'k'
             } else {
                 'j'
@@ -993,6 +994,40 @@ mod tests {
         assert_eq!(source_position(&app).row, 26);
         chars(&mut app, "L");
         assert_eq!(source_position(&app).row, 29);
+    }
+
+    #[test]
+    fn control_j_and_k_move_the_cursor_and_view_twenty_lines_in_diff_and_source() {
+        let text = (1..=45)
+            .map(|n| format!("line_{n}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let (_fixture, mut app) = source_app(&text);
+        app.page_height = 8;
+        app.comparison.files[0].lines = (1..=45)
+            .map(|n| crate::review::git::DiffLine {
+                kind: LineKind::Context,
+                text: format!("line_{n}"),
+                old_line: Some(n),
+                new_line: Some(n),
+            })
+            .collect();
+
+        for source in [true, false] {
+            if !source {
+                app.overlay = Overlay::None;
+            }
+            for (key, row, offset) in [('j', 20, 20), ('j', 40, 37), ('j', 44, 37), ('k', 24, 17)] {
+                assert!(!app.key(KeyEvent::new(KeyCode::Char(key), KeyModifiers::CONTROL)));
+                let position = if source {
+                    source_position(&app)
+                } else {
+                    app.cursor.position.unwrap()
+                };
+                assert_eq!(position.row, row);
+                assert_eq!(app.cursor_offsets().0, offset);
+            }
+        }
     }
 
     #[test]
