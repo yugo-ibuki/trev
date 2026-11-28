@@ -268,7 +268,12 @@ impl App {
 
     pub(super) fn draw_symbol_picker(&self, frame: &mut Frame, picker: &SymbolPicker, area: Rect) {
         frame.render_widget(Clear, area);
-        frame.render_widget(panel("コード内の名前を選ぶ", true), area);
+        let view = if picker.origin.is_some() {
+            CodeView::Source
+        } else {
+            self.diff_view(self.current())
+        };
+        frame.render_widget(code_panel(view, "名前を選ぶ", true), area);
         let regions = Layout::vertical([
             Constraint::Length(2),
             Constraint::Min(1),
@@ -1312,7 +1317,7 @@ mod tests {
         search.query = "needle".into();
         source.symbols = Some(Box::new(search));
         app.overlay = Overlay::Source(source);
-        assert!(rendered(&mut app).contains("found.rs検索語:needle[操作中]"));
+        assert!(rendered(&mut app).contains("[ファイル全体]found.rs検索語:needle[操作中]"));
         press(&mut app, KeyCode::Esc);
         assert!(matches!(&app.overlay, Overlay::Symbols(search) if search.query == "needle"));
     }

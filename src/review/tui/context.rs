@@ -157,10 +157,14 @@ impl Expanded {
 }
 
 impl App {
-    pub(super) fn display_file(&self, index: usize) -> &FileDiff {
+    pub(super) fn expanded_file(&self, index: usize) -> Option<&Expanded> {
         self.expanded
             .as_ref()
             .filter(|e| e.key == self.original_color_key(index))
+    }
+
+    pub(super) fn display_file(&self, index: usize) -> &FileDiff {
+        self.expanded_file(index)
             .map_or(&self.comparison.files[index], |e| &e.file)
     }
     pub(super) fn original_color_key(&self, index: usize) -> ColorKey {
@@ -491,6 +495,58 @@ mod tests {
         assert_eq!(app.comparison.files[0].digest, "digest");
         super::super::tests::press(&mut app, KeyCode::Char('a'));
         assert_eq!(app.display_file(0).lines.len(), partial);
+    }
+
+    #[test]
+    fn code_title_identifies_the_active_view_independently_of_focus() {
+        use super::super::tests::press;
+        use ratatui::backend::TestBackend;
+
+        let (_fixture, mut app) = expanded();
+        let mut terminal = Terminal::new(TestBackend::new(90, 24)).unwrap();
+        let mut check = |app: &mut App, title: &str, button: Option<&str>| {
+            let buffer = terminal.draw(|frame| app.draw(frame)).unwrap().buffer;
+            let pane = app.mouse_panes[1];
+            let row = |x, end, y| {
+                (x..end)
+                    .flat_map(|x| buffer[(x, y)].symbol().chars())
+                    .filter(|c| !c.is_whitespace())
+                    .collect::<String>()
+            };
+            let actual = row(pane.x + 1, pane.right() - 1, pane.y);
+            assert!(actual.starts_with(title), "{actual:?}");
+            if let Some(button) = button {
+                assert!(row(0, buffer.area.width, 2).contains(button));
+            }
+        };
+
+        app.focus = Focus::Files;
+        app.expand_gap(0, false, true);
+        check(&mut app, "[差分]a.rs", Some("全体を表示"));
+        press(&mut app, KeyCode::Char('a'));
+        check(&mut app, "[全体＋差分]a.rs", Some("差分に戻る"));
+        press(&mut app, KeyCode::Tab);
+        check(&mut app, "[全体＋差分]a.rs[操作中]", None);
+        press(&mut app, KeyCode::Char('s'));
+        check(&mut app, "[全体＋差分]名前を選ぶ", None);
+        press(&mut app, KeyCode::Esc);
+
+        let mut source = Source::new(
+            "headcommit".into(),
+            "plain.txt".into(),
+            1,
+            "file contents".into(),
+        );
+        source.return_focus = Some(Focus::Diff);
+        app.overlay = Overlay::Source(source);
+        check(&mut app, "[ファイル全体]plain.txt", None);
+        press(&mut app, KeyCode::Char('s'));
+        check(&mut app, "[ファイル全体]名前を選ぶ", None);
+        press(&mut app, KeyCode::Esc);
+        press(&mut app, KeyCode::Esc);
+        check(&mut app, "[全体＋差分]a.rs[操作中]", None);
+        press(&mut app, KeyCode::Char('a'));
+        check(&mut app, "[差分]a.rs[操作中]", Some("全体を表示"));
     }
 
     #[test]

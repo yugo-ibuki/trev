@@ -91,6 +91,12 @@ enum Focus {
     Diff,
 }
 
+enum CodeView {
+    Diff,
+    FullDiff,
+    Source,
+}
+
 struct Picker {
     target: usize,
     query: String,
@@ -962,15 +968,11 @@ impl App {
                     MouseAction::History,
                 ),
             ];
-            if let Some(expanded) = self.current().and_then(|i| {
-                self.expanded
-                    .as_ref()
-                    .filter(|e| e.key == self.original_color_key(i))
-            }) {
+            if let Some(expanded) = self.current().and_then(|i| self.expanded_file(i)) {
                 let label = if expanded.is_full() {
-                    "差分だけ"
+                    "差分に戻る"
                 } else {
-                    "ファイル全体"
+                    "全体を表示"
                 };
                 buttons.push((label, MouseAction::Key(KeyCode::Char('a'))));
             }
@@ -1167,26 +1169,32 @@ impl App {
         }
     }
 
+    fn diff_view(&self, index: Option<usize>) -> CodeView {
+        if index
+            .and_then(|i| self.expanded_file(i))
+            .is_some_and(|expanded| expanded.is_full())
+        {
+            CodeView::FullDiff
+        } else {
+            CodeView::Diff
+        }
+    }
+
     fn draw_diff(&mut self, frame: &mut Frame, area: Rect) {
-        let path = self
-            .current()
-            .map(|index| clean(self.comparison.files[index].path()))
-            .unwrap_or_default();
-        let block = panel(
+        let index = self.current();
+        let path = index.map_or("", |i| self.comparison.files[i].path());
+        let focused = self.focus == Focus::Diff;
+        let block = code_panel(
+            self.diff_view(index),
             &format!(
-                "差分 {} 旧行/新行 {} Esc:ファイル一覧へ",
-                if self.focus == Focus::Diff {
-                    "[操作中]"
-                } else {
-                    ""
-                },
-                path
+                "{path}{}  旧行/新行  Esc:ファイル一覧へ",
+                if focused { " [操作中]" } else { "" },
             ),
-            self.focus == Focus::Diff,
+            focused,
         );
         let inner = block.inner(area);
         self.page_height = usize::from(inner.height).max(1);
-        let Some(index) = self.current() else {
+        let Some(index) = index else {
             frame.render_widget(
                 Paragraph::new("表示する差分はありません").block(block),
                 area,
@@ -1521,10 +1529,11 @@ impl App {
             .as_ref()
             .map(|search| format!(" 検索語: {}", clean(search.query())))
             .unwrap_or_default();
-        let block = panel(
+        let block = code_panel(
+            CodeView::Source,
             &format!(
                 "{}{query} [操作中] s:名前を選ぶ d:定義 R:使用箇所 j/k ↑↓:移動 Esc:{}",
-                clean(&source.path),
+                source.path,
                 if source.symbols.is_some() {
                     "名前検索へ"
                 } else if source.all_files.is_some() || source.return_focus.is_some() {
@@ -1666,9 +1675,30 @@ fn clean(text: &str) -> String {
 }
 
 fn panel(title: &str, focused: bool) -> Block<'static> {
+    bordered_panel(focused).title(clean(title))
+}
+
+fn code_panel(view: CodeView, title: &str, focused: bool) -> Block<'static> {
+    let (label, color) = match view {
+        CodeView::Diff => ("[差分]", Color::Cyan),
+        CodeView::FullDiff => ("[全体＋差分]", Color::LightYellow),
+        CodeView::Source => ("[ファイル全体]", Color::LightGreen),
+    };
+    bordered_panel(focused).title(Line::from(vec![
+        Span::styled(
+            label,
+            Style::default()
+                .fg(Color::Black)
+                .bg(color)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(format!("  {}", clean(title))),
+    ]))
+}
+
+fn bordered_panel(focused: bool) -> Block<'static> {
     Block::default()
         .borders(Borders::ALL)
-        .title(clean(title))
         .border_style(Style::default().fg(if focused {
             Color::Cyan
         } else {
