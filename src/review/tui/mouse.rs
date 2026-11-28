@@ -138,7 +138,7 @@ impl App {
         if let Some(action) = self.mouse_control_at(column, row) {
             return Some(MouseHit::Control(action));
         }
-        if matches!(self.overlay, Overlay::None)
+        if (matches!(self.overlay, Overlay::None) || self.browser_source())
             && self.focus == Focus::Files
             && self.mouse_panes[1].contains((column, row).into())
         {
@@ -189,7 +189,8 @@ impl App {
                 }
                 match hit {
                     MouseHit::Pane(focus) => {
-                        if focus == Focus::Files && self.inline_code() {
+                        self.file_browser.editing = false;
+                        if focus == Focus::Files && self.inline_code() && !self.browser_source() {
                             self.overlay = Overlay::None;
                         }
                         self.focus = focus;

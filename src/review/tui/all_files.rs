@@ -686,9 +686,6 @@ mod tests {
     fn shortcuts_tabs_queries_and_empty_content_are_distinct_from_diff_search() {
         let (_fixture, mut app) = super::super::tests::app();
         app.focus = Focus::Files;
-        press(&mut app, KeyCode::Char('f'));
-        assert!(matches!(app.overlay, Overlay::AllFiles(_)));
-        press(&mut app, KeyCode::Esc);
         assert!(!app.key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL)));
         assert!(matches!(app.overlay, Overlay::AllFiles(_)));
         app.overlay = Overlay::AllFiles(Box::new(search(&app)));

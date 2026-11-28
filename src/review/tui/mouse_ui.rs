@@ -5,6 +5,9 @@ use super::*;
 pub(super) enum MouseAction {
     Key(KeyCode),
     AllFiles,
+    ToggleFileBrowser,
+    PathFilter,
+    BrowserRow(usize),
     Compare,
     History,
     SelectRow(usize),
@@ -119,6 +122,7 @@ impl App {
     }
 
     pub(super) fn activate_mouse_control(&mut self, action: MouseAction) {
+        self.file_browser.editing = false;
         if matches!(action, MouseAction::SelectRow(_) | MouseAction::MarkRow(_))
             && self.inline_code()
         {
@@ -127,6 +131,9 @@ impl App {
         match action {
             MouseAction::Key(key) => self.mouse_key(key),
             MouseAction::AllFiles => self.open_all_files(),
+            MouseAction::ToggleFileBrowser => self.toggle_file_browser(),
+            MouseAction::PathFilter => self.start_path_filter(),
+            MouseAction::BrowserRow(index) => self.open_browser_row(index, Focus::Files),
             MouseAction::History => self.history.enabled = !self.history.enabled,
             MouseAction::Compare => {
                 self.main_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE));
@@ -197,7 +204,7 @@ impl App {
             _ => return false,
         };
         let previous_focus = self.focus;
-        if matches!(self.overlay, Overlay::None) {
+        if matches!(self.overlay, Overlay::None) || self.browser_source() {
             let position = (mouse.column, mouse.row).into();
             if self.mouse_panes[0].contains(position) {
                 self.focus = Focus::Files;

@@ -104,6 +104,7 @@ struct Picker {
 }
 
 mod all_files;
+mod file_browser;
 mod file_tree;
 use file_tree::Row as TreeRow;
 mod blame;
@@ -123,6 +124,7 @@ struct Source {
     symbols: Option<Box<Symbols>>,
     all_files: Option<Box<AllFiles>>,
     return_focus: Option<Focus>,
+    from_browser: bool,
     path: String,
     lines: Vec<String>,
     offset: usize,
@@ -152,6 +154,7 @@ impl Source {
             symbols: None,
             all_files: None,
             return_focus: None,
+            from_browser: false,
             path,
             lines,
             offset: matched,
@@ -193,6 +196,7 @@ struct App {
     repository: Repository,
     comparison: Comparison,
     viewed: ViewedStore,
+    file_browser: file_browser::FileBrowser,
     selected: usize,
     only_unviewed: bool,
     collapsed: HashSet<String>,
@@ -238,6 +242,7 @@ pub(super) fn run(
         repository,
         comparison,
         viewed,
+        file_browser: Default::default(),
         selected: 0,
         only_unviewed: false,
         collapsed: HashSet::new(),
@@ -317,12 +322,16 @@ pub(super) fn run(
 
 impl App {
     fn visible(&self) -> Vec<usize> {
+        let path_query = self.file_browser.query.to_lowercase();
         self.comparison
             .files
             .iter()
             .enumerate()
             .filter(|(_, file)| {
-                !self.only_unviewed || !self.viewed.is_viewed(&self.comparison, file)
+                self.file_browser.active
+                    || ((!self.only_unviewed || !self.viewed.is_viewed(&self.comparison, file))
+                        && (path_query.is_empty()
+                            || clean(file.path()).to_lowercase().contains(&path_query)))
             })
             .map(|(index, _)| index)
             .collect()
@@ -466,6 +475,7 @@ impl App {
         if matches!(self.overlay, Overlay::AllFiles(_)) {
             changed |= self.poll_all_files();
         }
+        changed |= self.poll_file_browser();
         changed |= self.poll_result_preview();
         self.start_colors();
         changed
@@ -573,6 +583,10 @@ impl App {
             return true;
         }
         self.error = None;
+        if self.file_browser.editing {
+            self.path_filter_key(key);
+            return false;
+        }
         if key.code == KeyCode::Char('c') && key.modifiers == KeyModifiers::SUPER {
             self.command_copy_selection(copy);
             return false;
@@ -580,6 +594,22 @@ impl App {
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('p') {
             self.open_all_files();
             return false;
+        }
+        if self.focus == Focus::Files
+            && key.modifiers == KeyModifiers::NONE
+            && (matches!(self.overlay, Overlay::None) || self.browser_source())
+        {
+            if key.code == KeyCode::Char('f') {
+                self.toggle_file_browser();
+                return false;
+            }
+            if key.code == KeyCode::Char('p') {
+                self.start_path_filter();
+                return false;
+            }
+            if self.file_browser.active && self.file_browser_key(key.code) {
+                return false;
+            }
         }
         if self.code_cursor_key(key) {
             return false;
@@ -595,8 +625,16 @@ impl App {
             }
         }
         if matches!(key.code, KeyCode::Tab | KeyCode::BackTab) && self.inline_code() {
-            self.overlay = Overlay::None;
-            self.focus = Focus::Files;
+            if self.browser_source() {
+                self.focus = if self.focus == Focus::Files {
+                    Focus::Diff
+                } else {
+                    Focus::Files
+                };
+            } else {
+                self.overlay = Overlay::None;
+                self.focus = Focus::Files;
+            }
             return false;
         }
         let overlay = std::mem::replace(&mut self.overlay, Overlay::None);
@@ -682,6 +720,7 @@ impl App {
                                     self.colors.clear();
                                     self.select_first_tree_file();
                                     self.reset_position();
+                                    self.refresh_file_browser();
                                     return false;
                                 }
                                 Err(error) => {
@@ -752,7 +791,12 @@ impl App {
                         return false;
                     }
                     KeyCode::Esc | KeyCode::Char('q') => {
-                        if let Some(search) = source.symbols.take() {
+                        if source.from_browser {
+                            if key.code == KeyCode::Esc || self.focus == Focus::Diff {
+                                self.overlay = Overlay::Source(source);
+                            }
+                            self.focus = Focus::Files;
+                        } else if let Some(search) = source.symbols.take() {
                             self.overlay = Overlay::Symbols(search);
                         } else if let Some(search) = source.all_files.take() {
                             if key.code == KeyCode::Esc {
@@ -806,9 +850,6 @@ impl App {
             KeyCode::Char('p') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.open_all_files()
             }
-            KeyCode::Char('f') if !key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.open_all_files()
-            }
             KeyCode::Char('q') => return true,
             KeyCode::Char('?') => self.overlay = Overlay::Help(0),
             KeyCode::Esc => self.focus = Focus::Files,
@@ -837,7 +878,7 @@ impl App {
             KeyCode::Char('/') => self.overlay = Overlay::Search(self.query.clone()),
             KeyCode::Char('n') => self.search(false, false),
             KeyCode::Char('N') => self.search(true, false),
-            KeyCode::Char('u') => {
+            KeyCode::Char('u') if !self.file_browser.active => {
                 let previous = self.current();
                 self.only_unviewed = !self.only_unviewed;
                 let visible = self.visible();
@@ -853,7 +894,7 @@ impl App {
                     let value = !self.viewed.is_viewed(&self.comparison, file);
                     match self.viewed.set_viewed(&self.comparison, file, value) {
                         Ok(()) => {
-                            if self.only_unviewed {
+                            if self.only_unviewed && !self.file_browser.active {
                                 self.selected =
                                     self.selected.min(self.visible().len().saturating_sub(1));
                                 self.reconcile_tree();
@@ -941,7 +982,7 @@ impl App {
             short_ref(&self.comparison.head),
             viewed_count,
             self.comparison.files.len(),
-            if self.only_unviewed {
+            if self.only_unviewed && !self.file_browser.active {
                 "  [未確認のみ]"
             } else {
                 ""
@@ -951,31 +992,42 @@ impl App {
             Paragraph::new(title).style(Style::default().fg(Color::Cyan)),
             sections[0],
         );
-        if matches!(self.overlay, Overlay::None) {
+        if matches!(self.overlay, Overlay::None) || self.browser_source() {
             let controls = Rect::new(sections[0].x, sections[0].y + 2, sections[0].width, 1)
                 .intersection(sections[0]);
+            let next_mode = if self.file_browser.active {
+                "差分のみ"
+            } else {
+                "全ファイル"
+            };
             let mut buttons = vec![
-                ("全ファイル", MouseAction::AllFiles),
-                ("比較", MouseAction::Compare),
-                ("参照", MouseAction::Key(KeyCode::Char('r'))),
-                ("差分検索", MouseAction::Key(KeyCode::Char('/'))),
-                (
-                    if self.history.enabled {
-                        "行の履歴:ON"
-                    } else {
-                        "行の履歴"
-                    },
-                    MouseAction::History,
-                ),
+                (next_mode, MouseAction::ToggleFileBrowser),
+                ("パス絞り込み", MouseAction::PathFilter),
             ];
-            if let Some(expanded) = self.current().and_then(|i| self.expanded_file(i)) {
-                let label = if expanded.is_full() {
-                    "差分に戻る"
-                } else {
-                    "全体を表示"
-                };
-                buttons.push((label, MouseAction::Key(KeyCode::Char('a'))));
+            if matches!(self.overlay, Overlay::None) {
+                buttons.extend([
+                    ("比較", MouseAction::Compare),
+                    ("参照", MouseAction::Key(KeyCode::Char('r'))),
+                    ("差分検索", MouseAction::Key(KeyCode::Char('/'))),
+                    (
+                        if self.history.enabled {
+                            "行の履歴:ON"
+                        } else {
+                            "行の履歴"
+                        },
+                        MouseAction::History,
+                    ),
+                ]);
+                if let Some(expanded) = self.current().and_then(|i| self.expanded_file(i)) {
+                    let label = if expanded.is_full() {
+                        "差分に戻る"
+                    } else {
+                        "全体を表示"
+                    };
+                    buttons.push((label, MouseAction::Key(KeyCode::Char('a'))));
+                }
             }
+            buttons.push(("ファイル検索", MouseAction::AllFiles));
             self.draw_click_buttons(frame, controls, &buttons);
         }
         let panes = if area.width < 72 {
@@ -988,7 +1040,12 @@ impl App {
                 .split(sections[1])
         };
         self.mouse_panes = [panes[0], panes[1]];
-        self.draw_files(frame, panes[0]);
+        let file_list = self.draw_path_filter(frame, panes[0]);
+        if self.file_browser.active {
+            self.draw_file_browser(frame, file_list);
+        } else {
+            self.draw_files(frame, file_list);
+        }
         self.draw_diff(frame, panes[1]);
         if sections[2].height >= 2 {
             let status = Rect::new(sections[2].x, sections[2].y + 1, sections[2].width, 1);
@@ -997,15 +1054,19 @@ impl App {
                     (
                         if let Some(history) = self.blame_status() {
                             history
+                        } else if self.browser_loading_source() {
+                            "ソースを読み込み中…".into()
                         } else if matches!(self.overlay, Overlay::SymbolPicker(_)) {
                             "↑↓ 行 / ←→ 名前 / Enter 定義 / R 使用箇所 / Esc 戻る".into()
                         } else {
                             format!(
                                 "{}   検索={} 横位置={}",
-                                if matches!(self.overlay, Overlay::Source(_)) {
+                                if self.file_browser.active && self.focus == Focus::Files {
+                                    "j/k:移動 Enter:開閉/操作 p:パス絞り込み f:差分のみ"
+                                } else if matches!(self.overlay, Overlay::Source(_)) {
                                     "h/j/k/l w/b/e:移動 v/V:選択 iw:単語 y/⌘C:コピー"
                                 } else if self.focus == Focus::Files {
-                                    "j/k:次/前のファイル ?:ヘルプ"
+                                    "j/k:次/前のファイル p:パス絞り込み ?:ヘルプ"
                                 } else {
                                     "h/j/k/l w/b/e:移動 v/V:選択 iw:単語 y/⌘C:コピー ?:ヘルプ"
                                 },
@@ -1086,7 +1147,9 @@ impl App {
         );
         if visible.is_empty() {
             frame.render_widget(
-                Paragraph::new(if self.only_unviewed {
+                Paragraph::new(if !self.file_browser.query.is_empty() {
+                    "一致するパスはありません"
+                } else if self.only_unviewed {
                     "未確認ファイルはありません"
                 } else {
                     "変更ファイルはありません"
@@ -1313,7 +1376,7 @@ impl App {
         let block = panel("操作方法 ↑↓:移動 Esc:閉じる", true);
         let inner = block.inner(area);
         let regions = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).split(inner);
-        let text = "Tab: ファイル一覧 / 差分の操作先を切替\n選択中のEsc: 選択解除、通常時のEsc: 左のファイル一覧へ\n↑↓: 操作中の領域を移動\nファイル一覧でEnter: ファイルは差分を選択、フォルダは開閉、←/→: 閉じる/開く\nファイル行で←: 親フォルダへ、Space: ファイルだけ確認\nj / k: ファイル一覧では次 / 前の変更ファイル、コードではカーソルを上下移動\nPageUp/Down: 差分を1画面移動\nHome/End: 差分の先頭 / 末尾\nコードでh/j/k/l: 文字・行移動、数字で回数指定\nw/b/e: 単語の次/前/末尾、W/B/E: 空白区切りの単語\n0/^/$: 行頭/最初の文字/行末、gg/G: 先頭/末尾\n数字+gg/G: 表示済みのソース行番号へ（差分は最も近い行）\nCtrl+d/u: 半画面、Ctrl+f/b: 1画面、H/M/L: 画面の上/中央/下\nf/F+文字: 行内の次/前、t/T: その手前、; / ,: 同方向/逆方向へ反復\nv/V: 文字/行選択、選択中の移動で範囲を伸縮\niw/aw/iW/aW: 単語/空白付き単語の選択、y: コピー\n⌘C: 選択範囲をコピー（端末がキーをアプリへ転送する場合）\nyy: 行コピー、yiw/yaw/yiW/yaW: 単語コピー\nコピー成功時は選択解除し範囲の先頭へ移動\ngd: カーソル位置の定義、gr: 使用箇所\ngb / 上部の行の履歴: 現在行の変更者・時刻・コミットを表示/非表示\nコードで←→: 左右スクロール、↑↓: 上下スクロール\nSpace: 確認済みを切替（即時保存）\nu: 未確認のみを切替\nファイル一覧でb / コードでC: 比較するbase / headを選択\n/: 差分内の文字列を検索、空欄Enterで解除\nn / N: 次 / 前の検索結果（末尾から循環）\nファイル一覧でe/E / コードでze/zE: 省略区間を20行/全行表示\na: ファイル全体 / 差分を切替\nファイル一覧でf / Ctrl+P: 全ファイルをパス・中身で検索\n全ファイルでTab: パス/中身、Enter: 検索/開く\n全ファイルとそのソースでEsc: 開く前の画面・操作先へ、ソースでq/戻る: 検索結果へ\nコード上の名前をクリック: 定義、Shift+クリック: 使用箇所\n差分・ソースでs: 右ペイン内でコード内の名前を選ぶ\n名前選択で↑↓: 行、←→: 名前、Enter/d: 定義、Shift+R: 使用箇所\nd / R: 名前を入力して定義 / 使用箇所を検索\n定義・使用箇所でTab:切替 Enter:検索/開く Esc:戻る\nr: 参照元 / 参照先を表示\n参照一覧でTab: 方向切替、Enter: 該当行のソース\nEsc: 元の差分へ戻る\nq: 終了、Ctrl+C: どの画面からも終了\n\n?: 閉じる / Esc: 閉じる";
+        let text = "Tab: ファイル一覧 / 差分の操作先を切替\n選択中のEsc: 選択解除、通常時のEsc: 左のファイル一覧へ\n↑↓: 操作中の領域を移動\nファイル一覧でEnter: ファイルは差分を選択、フォルダは開閉、←/→: 閉じる/開く\nファイル行で←: 親フォルダへ、Space: ファイルだけ確認\nj / k: ファイル一覧では次 / 前の変更ファイル、コードではカーソルを上下移動\nPageUp/Down: 差分を1画面移動\nHome/End: 差分の先頭 / 末尾\nコードでh/j/k/l: 文字・行移動、数字で回数指定\nw/b/e: 単語の次/前/末尾、W/B/E: 空白区切りの単語\n0/^/$: 行頭/最初の文字/行末、gg/G: 先頭/末尾\n数字+gg/G: 表示済みのソース行番号へ（差分は最も近い行）\nCtrl+d/u: 半画面、Ctrl+f/b: 1画面、H/M/L: 画面の上/中央/下\nf/F+文字: 行内の次/前、t/T: その手前、; / ,: 同方向/逆方向へ反復\nv/V: 文字/行選択、選択中の移動で範囲を伸縮\niw/aw/iW/aW: 単語/空白付き単語の選択、y: コピー\n⌘C: 選択範囲をコピー（端末がキーをアプリへ転送する場合）\nyy: 行コピー、yiw/yaw/yiW/yaW: 単語コピー\nコピー成功時は選択解除し範囲の先頭へ移動\ngd: カーソル位置の定義、gr: 使用箇所\ngb / 上部の行の履歴: 現在行の変更者・時刻・コミットを表示/非表示\nコードで←→: 左右スクロール、↑↓: 上下スクロール\nSpace: 確認済みを切替（即時保存）\nu: 未確認のみを切替\nファイル一覧でb / コードでC: 比較するbase / headを選択\n/: 差分内の文字列を検索、空欄Enterで解除\nn / N: 次 / 前の検索結果（末尾から循環）\nファイル一覧でe/E / コードでze/zE: 省略区間を20行/全行表示\na: ファイル全体 / 差分を切替\n左ペインでf: 差分のみ / 全ファイルを切替\n左ペインでp: パス絞り込み、Enter/Esc: 入力終了、Ctrl+u: クリア\n全ファイルツリーでj/k: 移動・プレビュー、Enter: フォルダ開閉 / 右ペインへ\nCtrl+P: ファイル検索、Tab: パス/中身、Enter: 検索/開く\nファイル検索とそのソースでEsc: 開く前へ、ソースでq/戻る: 検索結果へ\nコード上の名前をクリック: 定義、Shift+クリック: 使用箇所\n差分・ソースでs: 右ペイン内でコード内の名前を選ぶ\n名前選択で↑↓: 行、←→: 名前、Enter/d: 定義、Shift+R: 使用箇所\nd / R: 名前を入力して定義 / 使用箇所を検索\n定義・使用箇所でTab:切替 Enter:検索/開く Esc:戻る\nr: 参照元 / 参照先を表示\n参照一覧でTab: 方向切替、Enter: 該当行のソース\nEsc: 元の差分へ戻る\nq: 終了、Ctrl+C: どの画面からも終了\n\n?: 閉じる / Esc: 閉じる";
         let lines = wrap_help(text, inner.width);
         self.help_page = regions[0].height.max(1);
         self.help_max = lines
@@ -1532,9 +1595,16 @@ impl App {
         let block = code_panel(
             CodeView::Source,
             &format!(
-                "{}{query} [操作中] s:名前を選ぶ d:定義 R:使用箇所 j/k ↑↓:移動 Esc:{}",
+                "{}{query}{} s:名前を選ぶ d:定義 R:使用箇所 j/k ↑↓:移動 Esc:{}",
                 source.path,
-                if source.symbols.is_some() {
+                if self.focus == Focus::Diff {
+                    " [操作中]"
+                } else {
+                    ""
+                },
+                if source.from_browser {
+                    "全ファイルへ"
+                } else if source.symbols.is_some() {
                     "名前検索へ"
                 } else if source.all_files.is_some() || source.return_focus.is_some() {
                     "元の画面へ"
@@ -1542,7 +1612,7 @@ impl App {
                     "ファイル一覧へ"
                 }
             ),
-            true,
+            self.focus == Focus::Diff,
         );
         let regions =
             Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).split(block.inner(area));
@@ -1794,6 +1864,7 @@ mod tests {
                 files,
             },
             viewed,
+            file_browser: Default::default(),
             selected: 0,
             only_unviewed: false,
             collapsed: HashSet::new(),
@@ -1907,6 +1978,7 @@ mod tests {
             symbols: None,
             all_files: None,
             return_focus: None,
+            from_browser: false,
             path: "a.rs".into(),
             lines: vec!["source".into()],
             offset: 0,
@@ -1990,6 +2062,7 @@ mod tests {
                         symbols: None,
                         all_files: None,
                         return_focus: None,
+                        from_browser: false,
                         path: "control\x1b.rs".into(),
                         lines: vec!["text".into()],
                         offset: 0,
@@ -2141,6 +2214,7 @@ mod tests {
             symbols: None,
             all_files: None,
             return_focus: None,
+            from_browser: false,
             path: "a.rs".into(),
             lines: vec!["fn main() {}".into()],
             offset: 0,
