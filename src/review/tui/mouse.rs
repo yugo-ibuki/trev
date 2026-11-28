@@ -4,6 +4,7 @@ use ratatui::buffer::CellWidth;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum MouseHit {
+    Divider(u16),
     Control(MouseAction),
     Pane(Focus),
     Code(usize, usize),
@@ -138,6 +139,15 @@ impl App {
         if let Some(action) = self.mouse_control_at(column, row) {
             return Some(MouseHit::Control(action));
         }
+        if self.can_resize_panes() {
+            let [left, right] = self.mouse_panes;
+            if row > left.y
+                && row < left.bottom().saturating_sub(1)
+                && (right.x - 1..=right.x).contains(&column)
+            {
+                return Some(MouseHit::Divider(right.x - column));
+            }
+        }
         if (matches!(self.overlay, Overlay::None) || self.browser_source())
             && self.focus == Focus::Files
             && self.mouse_panes[1].contains((column, row).into())
@@ -166,12 +176,30 @@ impl App {
         None
     }
 
+    fn resize_from_mouse(&mut self, column: u16, grab_offset: u16) -> bool {
+        if !self.can_resize_panes() {
+            return false;
+        }
+        let [left, right] = self.mouse_panes;
+        let total = u32::from(right.right() - left.x);
+        let target = u32::from(column.saturating_add(grab_offset).saturating_sub(left.x));
+        let percent = (target * 100 + total / 2) / total;
+        self.set_file_pane_percent(percent.min(100) as u16)
+    }
+
     pub(super) fn mouse(&mut self, mouse: MouseEvent) -> bool {
         match mouse.kind {
             MouseEventKind::Down(MouseButton::Left) => {
                 self.mouse_down = self
                     .mouse_hit(mouse.column, mouse.row)
                     .map(|hit| (mouse.column, mouse.row, hit));
+                false
+            }
+            MouseEventKind::Drag(MouseButton::Left) => {
+                if let Some((_, _, MouseHit::Divider(offset))) = self.mouse_down {
+                    return self.resize_from_mouse(mouse.column, offset);
+                }
+                self.mouse_down = None;
                 false
             }
             MouseEventKind::Drag(_) => {
@@ -182,12 +210,18 @@ impl App {
                 let Some((column, row, hit)) = self.mouse_down.take() else {
                     return false;
                 };
+                if let MouseHit::Divider(offset) = hit {
+                    let moved = column != mouse.column
+                        || self.mouse_panes[1].x != column.saturating_add(offset);
+                    return moved && self.resize_from_mouse(mouse.column, offset);
+                }
                 if (column, row) != (mouse.column, mouse.row)
                     || self.mouse_hit(column, row) != Some(hit)
                 {
                     return false;
                 }
                 match hit {
+                    MouseHit::Divider(_) => false,
                     MouseHit::Pane(focus) => {
                         self.file_browser.editing = false;
                         if focus == Focus::Files && self.inline_code() && !self.browser_source() {

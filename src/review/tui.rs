@@ -192,6 +192,9 @@ struct ColorKey {
 
 type DiffColors = Vec<Option<Spans>>;
 
+const DEFAULT_FILE_PANE_PERCENT: u16 = 25;
+const FILE_PANE_PERCENT_RANGE: std::ops::RangeInclusive<u16> = 15..=60;
+
 struct App {
     repository: Repository,
     comparison: Comparison,
@@ -230,6 +233,7 @@ struct App {
     context_history: HashMap<ColorKey, context::OpenedContext>,
     mouse_targets: std::cell::RefCell<Vec<(Rect, MouseAction)>>,
     mouse_panes: [Rect; 2],
+    file_pane_percent: u16,
     exit_requested: bool,
 }
 
@@ -275,6 +279,7 @@ pub(super) fn run(
         context_history: HashMap::new(),
         mouse_targets: Default::default(),
         mouse_panes: Default::default(),
+        file_pane_percent: DEFAULT_FILE_PANE_PERCENT,
         exit_requested: false,
     };
     app.select_first_tree_file();
@@ -583,6 +588,16 @@ impl App {
             return true;
         }
         self.error = None;
+        if key.modifiers == KeyModifiers::ALT && self.can_resize_panes() {
+            match key.code {
+                KeyCode::Left | KeyCode::Right => {
+                    let step = if key.code == KeyCode::Left { -5 } else { 5 };
+                    self.set_file_pane_percent(self.file_pane_percent.saturating_add_signed(step));
+                    return false;
+                }
+                _ => {}
+            }
+        }
         if self.file_browser.editing {
             self.path_filter_key(key);
             return false;
@@ -958,6 +973,21 @@ impl App {
             .map_or(&[], |index| index.rows(path, tab))
     }
 
+    fn can_resize_panes(&self) -> bool {
+        let [left, right] = self.mouse_panes;
+        !left.is_empty()
+            && !right.is_empty()
+            && left.x < right.x
+            && (matches!(self.overlay, Overlay::None) || self.inline_code())
+    }
+
+    fn set_file_pane_percent(&mut self, percent: u16) -> bool {
+        let percent = percent.clamp(*FILE_PANE_PERCENT_RANGE.start(), *FILE_PANE_PERCENT_RANGE.end());
+        let changed = self.file_pane_percent != percent;
+        self.file_pane_percent = percent;
+        changed
+    }
+
     fn draw(&mut self, frame: &mut Frame) {
         self.prepare_code_cursor();
         self.start_blame();
@@ -1036,8 +1066,11 @@ impl App {
                 .constraints([Constraint::Percentage(30), Constraint::Percentage(70)])
                 .split(sections[1])
         } else {
-            Layout::horizontal([Constraint::Percentage(30), Constraint::Percentage(70)])
-                .split(sections[1])
+            Layout::horizontal([
+                Constraint::Percentage(self.file_pane_percent),
+                Constraint::Percentage(100 - self.file_pane_percent),
+            ])
+            .split(sections[1])
         };
         self.mouse_panes = [panes[0], panes[1]];
         let file_list = self.draw_path_filter(frame, panes[0]);
@@ -1129,6 +1162,11 @@ impl App {
             Overlay::Branches(picker) => self.draw_picker(frame, picker),
             Overlay::References { tab, selected } => self.draw_references(frame, *tab, *selected),
             Overlay::Source(source) => self.draw_source(frame, source, panes[1]),
+        }
+        if self.can_resize_panes() && panes[0].height > 2 {
+            let left = panes[0];
+            let grip = Rect::new(left.right() - 1, left.y + left.height / 2, 1, 1);
+            frame.render_widget(Paragraph::new("↔").style(Style::default().fg(Color::Gray)), grip);
         }
         self.prepare_code_cursor();
         self.align_code_cursor();
@@ -1376,7 +1414,7 @@ impl App {
         let block = panel("操作方法 ↑↓:移動 Esc:閉じる", true);
         let inner = block.inner(area);
         let regions = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).split(inner);
-        let text = "Tab: ファイル一覧 / 差分の操作先を切替\n選択中のEsc: 選択解除、通常時のEsc: 左のファイル一覧へ\n↑↓: 操作中の領域を移動\nファイル一覧でEnter: ファイルは差分を選択、フォルダは開閉、←/→: 閉じる/開く\nファイル行で←: 親フォルダへ、Space: ファイルだけ確認\nj / k: ファイル一覧では次 / 前の変更ファイル、コードではカーソルを上下移動\nPageUp/Down: 差分を1画面移動\nHome/End: 差分の先頭 / 末尾\nコードでh/j/k/l: 文字・行移動、数字で回数指定\nw/b/e: 単語の次/前/末尾、W/B/E: 空白区切りの単語\n0/^/$: 行頭/最初の文字/行末、gg/G: 先頭/末尾\n数字+gg/G: 表示済みのソース行番号へ（差分は最も近い行）\nCtrl+j/k: 20行、Ctrl+d/u: 半画面、Ctrl+f/b: 1画面、H/M/L: 画面の上/中央/下\nf/F+文字: 行内の次/前、t/T: その手前、; / ,: 同方向/逆方向へ反復\nv/V: 文字/行選択、選択中の移動で範囲を伸縮\niw/aw/iW/aW: 単語/空白付き単語の選択、y: コピー\n⌘C: 選択範囲をコピー（端末がキーをアプリへ転送する場合）\nyy: 行コピー、yiw/yaw/yiW/yaW: 単語コピー\nコピー成功時は選択解除し範囲の先頭へ移動\ngd: カーソル位置の定義、gr: 使用箇所\ngb / 上部の行の履歴: 現在行の変更者・時刻・コミットを表示/非表示\nコードで←→: 左右スクロール、↑↓: 上下スクロール\nSpace: 確認済みを切替（即時保存）\nu: 未確認のみを切替\nファイル一覧でb / コードでC: 比較するbase / headを選択\n/: 差分内の文字列を検索、空欄Enterで解除\nn / N: 次 / 前の検索結果（末尾から循環）\nファイル一覧でe/E / コードでze/zE: 省略区間を20行/全行表示\na: ファイル全体 / 差分を切替\n左ペインでf: 差分のみ / 全ファイルを切替\n左ペインでp: パス絞り込み、Enter/Esc: 入力終了、Ctrl+u: クリア\n全ファイルツリーでj/k: 移動・プレビュー、Enter: フォルダ開閉 / 右ペインへ\nCtrl+P: ファイル検索、Tab: パス/中身、Enter: 検索/開く\nファイル検索とそのソースでEsc: 開く前へ、ソースでq/戻る: 検索結果へ\nコード上の名前をクリック: 定義、Shift+クリック: 使用箇所\n差分・ソースでs: 右ペイン内でコード内の名前を選ぶ\n名前選択で↑↓: 行、←→: 名前、Enter/d: 定義、Shift+R: 使用箇所\nd / R: 名前を入力して定義 / 使用箇所を検索\n定義・使用箇所でj/k:結果移動 /:検索語の編集 Tab:切替 Enter:検索/開く Esc:戻る\nr: 参照元 / 参照先を表示\n参照一覧でTab: 方向切替、Enter: 該当行のソース\nEsc: 元の差分へ戻る\nq: 終了、Ctrl+C: どの画面からも終了\n\n?: 閉じる / Esc: 閉じる";
+        let text = "Tab: ファイル一覧 / 差分の操作先を切替\n左右の境界をドラッグ / Alt+←→: ファイル一覧の幅を調整\n選択中のEsc: 選択解除、通常時のEsc: 左のファイル一覧へ\n↑↓: 操作中の領域を移動\nファイル一覧でEnter: ファイルは差分を選択、フォルダは開閉、←/→: 閉じる/開く\nファイル行で←: 親フォルダへ、Space: ファイルだけ確認\nj / k: ファイル一覧では次 / 前の変更ファイル、コードではカーソルを上下移動\nPageUp/Down: 差分を1画面移動\nHome/End: 差分の先頭 / 末尾\nコードでh/j/k/l: 文字・行移動、数字で回数指定\nw/b/e: 単語の次/前/末尾、W/B/E: 空白区切りの単語\n0/^/$: 行頭/最初の文字/行末、gg/G: 先頭/末尾\n数字+gg/G: 表示済みのソース行番号へ（差分は最も近い行）\nCtrl+j/k: 20行、Ctrl+d/u: 半画面、Ctrl+f/b: 1画面、H/M/L: 画面の上/中央/下\nf/F+文字: 行内の次/前、t/T: その手前、; / ,: 同方向/逆方向へ反復\nv/V: 文字/行選択、選択中の移動で範囲を伸縮\niw/aw/iW/aW: 単語/空白付き単語の選択、y: コピー\n⌘C: 選択範囲をコピー（端末がキーをアプリへ転送する場合）\nyy: 行コピー、yiw/yaw/yiW/yaW: 単語コピー\nコピー成功時は選択解除し範囲の先頭へ移動\ngd: カーソル位置の定義、gr: 使用箇所\ngb / 上部の行の履歴: 現在行の変更者・時刻・コミットを表示/非表示\nコードで←→: 左右スクロール、↑↓: 上下スクロール\nSpace: 確認済みを切替（即時保存）\nu: 未確認のみを切替\nファイル一覧でb / コードでC: 比較するbase / headを選択\n/: 差分内の文字列を検索、空欄Enterで解除\nn / N: 次 / 前の検索結果（末尾から循環）\nファイル一覧でe/E / コードでze/zE: 省略区間を20行/全行表示\na: ファイル全体 / 差分を切替\n左ペインでf: 差分のみ / 全ファイルを切替\n左ペインでp: パス絞り込み、Enter/Esc: 入力終了、Ctrl+u: クリア\n全ファイルツリーでj/k: 移動・プレビュー、Enter: フォルダ開閉 / 右ペインへ\nCtrl+P: ファイル検索、Tab: パス/中身、Enter: 検索/開く\nファイル検索とそのソースでEsc: 開く前へ、ソースでq/戻る: 検索結果へ\nコード上の名前をクリック: 定義、Shift+クリック: 使用箇所\n差分・ソースでs: 右ペイン内でコード内の名前を選ぶ\n名前選択で↑↓: 行、←→: 名前、Enter/d: 定義、Shift+R: 使用箇所\nd / R: 名前を入力して定義 / 使用箇所を検索\n定義・使用箇所でj/k:結果移動 /:検索語の編集 Tab:切替 Enter:検索/開く Esc:戻る\nr: 参照元 / 参照先を表示\n参照一覧でTab: 方向切替、Enter: 該当行のソース\nEsc: 元の差分へ戻る\nq: 終了、Ctrl+C: どの画面からも終了\n\n?: 閉じる / Esc: 閉じる";
         let lines = wrap_help(text, inner.width);
         self.help_page = regions[0].height.max(1);
         self.help_max = lines
@@ -1810,6 +1848,54 @@ mod tests {
         }
     }
 
+    #[test]
+    fn wide_review_uses_one_quarter_of_the_width_for_the_file_list() {
+        use ratatui::backend::TestBackend;
+
+        let (_fixture, mut app) = app();
+        for (width, expected) in [(80, 20), (120, 30), (240, 60)] {
+            let mut terminal = Terminal::new(TestBackend::new(width, 24)).unwrap();
+            terminal.draw(|frame| app.draw(frame)).unwrap();
+            assert_eq!(app.mouse_panes[0].width, expected);
+            assert_eq!(app.mouse_panes[1].width, width - expected);
+        }
+    }
+
+    #[test]
+    fn review_pane_width_can_be_adjusted_by_dragging_or_with_alt_arrows() {
+        use ratatui::backend::TestBackend;
+
+        let (_fixture, mut app) = app();
+        let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        let row = app.mouse_panes[0].y + 4;
+        let left_mouse = |kind, column| MouseEvent {
+            kind,
+            column,
+            row,
+            modifiers: KeyModifiers::NONE,
+        };
+        assert!(!app.mouse(left_mouse(MouseEventKind::Down(MouseButton::Left), 29)));
+        assert!(app.mouse(left_mouse(MouseEventKind::Drag(MouseButton::Left), 47)));
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        assert_eq!(app.mouse_panes[0].width, 48);
+        assert!(app.mouse(left_mouse(MouseEventKind::Up(MouseButton::Left), 119)));
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        assert_eq!(app.mouse_panes[0].width, 72); // Clamp to 60%.
+
+        assert!(!app.key(KeyEvent::new(KeyCode::Left, KeyModifiers::ALT)));
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        assert_eq!(app.mouse_panes[0].width, 66);
+
+        let mut narrow = Terminal::new(TestBackend::new(60, 24)).unwrap();
+        narrow.draw(|frame| app.draw(frame)).unwrap();
+        assert!(!app.can_resize_panes());
+        assert_eq!(app.mouse_panes[0].width, 60);
+        assert_eq!(app.mouse_panes[1].y, app.mouse_panes[0].bottom());
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        assert_eq!(app.mouse_panes[0].width, 66);
+    }
+
     pub(super) fn app() -> (Fixture, App) {
         use super::super::git::{DiffLine, FileDiff};
         static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
@@ -1897,6 +1983,7 @@ mod tests {
             context_history: HashMap::new(),
             mouse_targets: Default::default(),
             mouse_panes: Default::default(),
+            file_pane_percent: DEFAULT_FILE_PANE_PERCENT,
             exit_requested: false,
         };
         (Fixture(path), app)
